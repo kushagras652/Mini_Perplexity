@@ -9,6 +9,7 @@ from agents.researcher_async import parallel_research
 import asyncio
 from agents.grounded_sunthesizer import grounded_synthesize
 from agents.evidence_checker import verify
+from agents.critic import critique
 
 db = VectorDB()
 
@@ -39,25 +40,32 @@ def synthesizer_node(state):
     )
 
     verdict=verify(answer,state['docs'])
-
-    if verdict['verdict']=='VALID':
-        state['answer']=answer
+    if verdict["verdict"] != "VALID":
+        state["answer"] = answer
         return state
-    
-    repair_prompt=f"""
-The following answer has issues:
-{verdict['issues']}
 
-Rewrite the answer strictly using the sources.
-If not possible, say "Insufficient evidence."
-"""
-    
-    repaired_answer=grounded_synthesize(
-        summary=state['summary']+"\n"+repair_prompt,
-        sources=state['docs']
+    # ---------- Reflection ----------
+    critique_result = critique(answer)
+
+    if not critique_result["needs_followup"]:
+        state["answer"] = answer
+        return state
+
+    # ---------- Follow-up Research (ONE iteration only) ----------
+    followup_queries = critique_result["followup_queries"][:2]
+
+    new_docs = asyncio.run(parallel_research(followup_queries))
+    state["docs"].extend(new_docs)
+
+    # Re-summarize with expanded evidence
+    combined_summary = summarizer(state["docs"])
+
+    improved_answer = grounded_synthesize(
+        summary=combined_summary,
+        sources=state["docs"]
     )
 
-    state['answer']=repaired_answer
+    state["answer"] = improved_answer
     return state
 
 graph = StateGraph(ResearchState)
